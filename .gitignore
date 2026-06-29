@@ -8,3 +8,4 @@
 
 # Пользовательские файлы Visual Studio / .NET
 *.user
+/Properties/PublishProfiles/
