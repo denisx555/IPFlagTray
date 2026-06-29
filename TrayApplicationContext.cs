@@ -22,8 +22,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private Icon? _currentIcon;
     private bool _isUpdating;
-    private string? _previousCountryCode;
     private bool _hasShownRussianIpAlert;
+    private IpInfo? _cachedInfo;
 
     /// <summary>
     /// Инициализирует контекст приложения и запускает первое обновление.
@@ -109,27 +109,39 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _isUpdating = true;
         try
         {
-            var info = await LoadIpInfoAsync();
+            var externalIp = await LoadExternalIpFromIfConfigAsync();
+            var previousCountryCode = _cachedInfo?.CountryCode;
+            var ipChanged = _cachedInfo is null
+                || !string.Equals(externalIp, _cachedInfo.IpAddress, StringComparison.Ordinal);
+
+            if (ipChanged)
+            {
+                var (countryName, countryCode) = await LoadGeoInfoAsync(externalIp);
+                _cachedInfo = new IpInfo(externalIp, countryName, countryCode);
+
+                if (!string.Equals(previousCountryCode, countryCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    var icon = await CreateFlagIconAsync(countryCode);
+                    SetTrayIcon(icon);
+                }
+
+                if (countryCode == "RU" && !_hasShownRussianIpAlert)
+                {
+                    _hasShownRussianIpAlert = true;
+                    ShowAlertOnUiThread(externalIp);
+                }
+
+                if (previousCountryCode == "RU" && countryCode != "RU")
+                {
+                    _hasShownRussianIpAlert = false;
+                }
+            }
+
+            var info = _cachedInfo!;
             _ipItem.Text = $"IP: {info.IpAddress}";
             _countryItem.Text = $"Страна: {info.CountryName} ({info.CountryCode})";
             _updatedItem.Text = $"Обновлено: {DateTime.Now:HH:mm:ss}";
-
-            var icon = await CreateFlagIconAsync(info.CountryCode);
-            SetTrayIcon(icon);
             _notifyIcon.Text = $"IPFlagTray | {info.IpAddress} | {info.CountryCode}";
-
-            if (info.CountryCode == "RU" && !_hasShownRussianIpAlert)
-            {
-                _hasShownRussianIpAlert = true;
-                ShowAlertOnUiThread(info.IpAddress);
-            }
-
-            if (_previousCountryCode == "RU" && info.CountryCode != "RU")
-            {
-                _hasShownRussianIpAlert = false;
-            }
-
-            _previousCountryCode = info.CountryCode;
         }
         catch (Exception ex)
         {
@@ -147,31 +159,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Загружает информацию о внешнем IP и стране.
+    /// Загружает гео-данные (страна) для указанного внешнего IP через ip-api.com.
     /// </summary>
-    /// <returns>Данные внешнего IP.</returns>
-    private async Task<IpInfo> LoadIpInfoAsync()
+    /// <param name="externalIp">Внешний IP-адрес.</param>
+    /// <returns>Название страны и её код.</returns>
+    private async Task<(string CountryName, string CountryCode)> LoadGeoInfoAsync(string externalIp)
     {
-        var externalIp = await LoadExternalIpFromIfConfigAsync();
-        var ipWhoIsUrl = $"https://ipwho.is/{externalIp}?fields=success,message,country,country_code";
+        var ipApiUrl = $"http://ip-api.com/json/{externalIp}?fields=status,message,country,countryCode";
 
-        using var responseMessage = await GetWithoutConnectionReuseAsync(ipWhoIsUrl);
+        using var responseMessage = await GetWithoutConnectionReuseAsync(ipApiUrl);
         var rawBody = await responseMessage.Content.ReadAsStringAsync();
 
         if (!responseMessage.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"ipwho.is вернул HTTP {(int)responseMessage.StatusCode} ({responseMessage.StatusCode}).");
+                $"ip-api вернул HTTP {(int)responseMessage.StatusCode} ({responseMessage.StatusCode}).");
         }
 
-        var response = DeserializeIpWhoIsResponse(rawBody);
+        var response = DeserializeIpApiResponse(rawBody);
 
         if (response is null)
         {
             throw new InvalidOperationException("IP-сервис вернул пустой ответ.");
         }
 
-        if (!response.Success)
+        if (!string.Equals(response.Status, "success", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(response.Message ?? "IP-сервис вернул ошибку.");
         }
@@ -181,10 +193,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             throw new InvalidOperationException("IP-сервис вернул неполные данные.");
         }
 
-        return new IpInfo(
-            externalIp,
-            response.Country ?? "Неизвестно",
-            response.CountryCode.ToUpperInvariant());
+        return (response.Country ?? "Неизвестно", response.CountryCode.ToUpperInvariant());
     }
 
     /// <summary>
@@ -232,6 +241,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         var lowerCode = countryCode.ToLowerInvariant();
         var flagUrl = $"https://flagcdn.com/w80/{lowerCode}.png";
+
         using var response = await GetWithoutConnectionReuseAsync(flagUrl);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync();
@@ -303,13 +313,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Десериализует JSON-ответ сервиса ipwho.is.
+    /// Десериализует JSON-ответ сервиса ip-api.com.
     /// </summary>
     /// <param name="rawBody">Текст ответа в формате JSON.</param>
     /// <returns>Десериализованная модель ответа.</returns>
-    private static IpWhoIsResponse? DeserializeIpWhoIsResponse(string rawBody)
+    private static IpApiResponse? DeserializeIpApiResponse(string rawBody)
     {
-        return System.Text.Json.JsonSerializer.Deserialize<IpWhoIsResponse>(
+        return System.Text.Json.JsonSerializer.Deserialize<IpApiResponse>(
             rawBody,
             new System.Text.Json.JsonSerializerOptions
             {
@@ -318,15 +328,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Внутренняя модель ответа сервиса ipwho.is.
+    /// Внутренняя модель ответа сервиса ip-api.com.
     /// </summary>
-    private sealed class IpWhoIsResponse
+    private sealed class IpApiResponse
     {
         /// <summary>
-        /// Признак успешного ответа.
+        /// Статус ответа: "success" или "fail".
         /// </summary>
-        [JsonPropertyName("success")]
-        public bool Success { get; set; }
+        [JsonPropertyName("status")]
+        public string? Status { get; set; }
 
         /// <summary>
         /// Сообщение об ошибке, если запрос неуспешен.
@@ -343,7 +353,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         /// <summary>
         /// Двухбуквенный код страны.
         /// </summary>
-        [JsonPropertyName("country_code")]
+        [JsonPropertyName("countryCode")]
         public string? CountryCode { get; set; }
     }
 
