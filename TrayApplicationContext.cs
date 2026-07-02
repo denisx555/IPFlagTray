@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json.Serialization;
 
@@ -49,6 +50,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var openIpPageItem = new ToolStripMenuItem("Открыть проверку IP");
         openIpPageItem.Click += (_, _) => OpenIpPage();
 
+        var aboutItem = new ToolStripMenuItem("О программе");
+        aboutItem.Click += (_, _) => ShowAbout();
+
         var exitItem = new ToolStripMenuItem("Выход");
         exitItem.Click += (_, _) => ExitThread();
 
@@ -67,6 +71,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.ContextMenuStrip.Items.Add(refreshItem);
         _notifyIcon.ContextMenuStrip.Items.Add(openIpPageItem);
         _notifyIcon.ContextMenuStrip.Items.Add(new ToolStripSeparator());
+        _notifyIcon.ContextMenuStrip.Items.Add(aboutItem);
         _notifyIcon.ContextMenuStrip.Items.Add(exitItem);
 
         _notifyIcon.DoubleClick += (_, _) => OpenIpPage();
@@ -288,6 +293,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             FileName = "https://ifconfig.me/",
             UseShellExecute = true
         });
+    }
+
+    private static void ShowAbout()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var name = asm.GetName().Name;
+        var informationalVersion = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        var version = informationalVersion?.Split('+')[0] ?? asm.GetName().Version?.ToString() ?? "?";
+        MessageBox.Show($"{name} {version}", "О программе",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     /// <summary>
